@@ -1532,7 +1532,7 @@ bool rndis_qc_get_skip_ep_config(void)
 	return rndis_ipa_params.skip_ep_cfg;
 }
 
-DECLARE_USB_FUNCTION_INIT(rndis_bam, qcrndis_alloc_inst, qcrndis_alloc);
+DECLARE_USB_FUNCTION(rndis_bam, qcrndis_alloc_inst, qcrndis_alloc);
 
 static int __init usb_qcrndis_init(void)
 {
