@@ -51,7 +51,11 @@
 
 #define MSM_SENSOR_BYPASS_VIDEO_NODE    1
 
-#define FRONT_AUX_SENSOR_SUPPORT
+#define SENSOR_PROBE_WRITE
+
+#define SECURE_CAMERA
+
+#define SECURE_CAM_RST_MODULES
 
 enum msm_sensor_camera_id_t {
 	CAMERA_0,
@@ -75,7 +79,6 @@ enum camb_position_t {
 	BACK_CAMERA_B,
 	FRONT_CAMERA_B,
 	AUX_CAMERA_B = 0x100,
-	FRONT_AUX_CAMERA_B,
 	INVALID_CAMERA_B,
 };
 
@@ -262,9 +265,6 @@ enum msm_camera_i2c_operation {
 	MSM_CAM_READ_PAGE,
 	MSM_CAM_WRITE_DELAYUSEC,
 	MSM_CAM_READ_CONTINUOUS,
-#ifdef CONFIG_MACH_ASUS_X00TD
-	MSM_CAM_SINGLE_LOOP_READ,
-#endif
 };
 
 struct msm_sensor_i2c_sync_params {
@@ -361,6 +361,9 @@ struct msm_camera_csid_params {
 	unsigned int csi_clk;
 	struct msm_camera_csid_lut_params lut_params;
 	unsigned char csi_3p_sel;
+	unsigned char is_secure;
+	uint32_t topology;
+	unsigned char is_streamon;
 };
 
 struct msm_camera_csid_testmode_parms {
