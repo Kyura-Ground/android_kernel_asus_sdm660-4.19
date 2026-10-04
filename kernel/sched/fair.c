@@ -821,12 +821,6 @@ static u64 ineligible_vruntime(struct cfs_rq *cfs_rq)
 	if (curr && !curr->on_rq)
 		curr = NULL;
 
-	/*
-	 * This is called from set_next_task_fair(.first=true) /
-	 * set_protect_slice() so curr had better be set and on_rq.
-	 */
-	WARN_ON_ONCE(!curr);
-
 	if (weight) {
 		s64 runtime = cfs_rq->sum_w_vruntime;
 
@@ -1137,10 +1131,9 @@ static inline void set_protect_slice(struct cfs_rq *cfs_rq, struct sched_entity 
 
 	/* If there are shorter slices than se's one */
 	if (slice != se->slice) {
+		vprot = min_vruntime(vprot, se->vruntime + calc_delta_fair(slice, se));
 		if (sched_feat(PREEMPT_SHORT))
 			vprot = min_vruntime(vprot, ineligible_vruntime(cfs_rq));
-		else
-			vprot = min_vruntime(vprot, se->vruntime + calc_delta_fair(slice, se));
 	}
 
 	se->vprot = vprot;
@@ -1148,10 +1141,19 @@ static inline void set_protect_slice(struct cfs_rq *cfs_rq, struct sched_entity 
 
 static inline void update_protect_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	u64 slice = cfs_rq_min_slice(cfs_rq);
 	u64 vruntime = min_vruntime(se->vruntime, avg_vruntime(cfs_rq));
+	u64 slice = normalized_sysctl_sched_base_slice;
+	u64 vprot;
 
-	se->vprot = min_vruntime(se->vprot, vruntime + calc_delta_fair(slice, se));
+	if (sched_feat(RUN_TO_PARITY))
+		slice = cfs_rq_min_slice(cfs_rq);
+
+	vprot = min_vruntime(se->vprot, vruntime + calc_delta_fair(slice, se));
+
+	if (sched_feat(PREEMPT_SHORT) && slice != se->slice)
+		vprot = min_vruntime(vprot, ineligible_vruntime(cfs_rq));
+
+	se->vprot = vprot;
 }
 
 static inline bool protect_slice(struct sched_entity *se)
@@ -8646,8 +8648,14 @@ static inline bool set_preempt_buddy(struct cfs_rq *cfs_rq, struct sched_entity 
 
 static inline bool set_short_buddy(struct cfs_rq *cfs_rq, struct sched_entity *pse)
 {
-	if (cfs_rq->next && cfs_rq->next->slice < pse->slice)
-		return false;
+	if (cfs_rq->next) {
+		if (cfs_rq->next->slice < pse->slice)
+			return false;
+
+		if (cfs_rq->next->slice == pse->slice &&
+		    entity_before(cfs_rq->next, pse))
+			return false;
+	}
 
 	set_next_buddy(pse);
 	return true;
