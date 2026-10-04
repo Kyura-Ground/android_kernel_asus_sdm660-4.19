@@ -22,67 +22,71 @@
 
 int gf_parse_dts(struct gf_dev *gf_dev)
 {
-	int rc = 0;
+	int rc, gpio;
 	struct device *dev = &gf_dev->spi->dev;
 	struct device_node *np = dev->of_node;
 
-	gf_dev->vdd_gpio = of_get_named_gpio(np, "goodix,gpio_vdd", 0);
-	if (gf_dev->vdd_gpio < 0) {
-		pr_err("falied to get vdd gpio!\n");
-		return gf_dev->vdd_gpio;
-	}
-	rc = devm_gpio_request(dev, gf_dev->vdd_gpio, "goodix_vdd");
-	if (rc) {
-		pr_err("failed to request vdd gpio, rc = %d\n", rc);
-		goto err_vdd;
-	}
-	gpio_direction_output(gf_dev->vdd_gpio, 1);
+	gpio = of_get_named_gpio(np, "goodix,gpio_vdd", 0);
+	if (gpio < 0)
+		return gpio;
+	rc = devm_gpio_request(dev, gpio, "goodix_vdd");
+	if (rc)
+		return rc;
+	gf_dev->vdd_gpio = gpio;
+	rc = gpio_direction_output(gpio, 1);
+	if (rc)
+		goto err_cleanup;
 
-	gf_dev->reset_gpio = of_get_named_gpio(np, "goodix,reset_gpio", 0);
-	if (gf_dev->reset_gpio < 0) {
-		pr_err("falied to get reset gpio!\n");
-		return gf_dev->reset_gpio;
+	gpio = of_get_named_gpio(np, "goodix,reset_gpio", 0);
+	if (gpio < 0) {
+		rc = gpio;
+		goto err_cleanup;
 	}
+	rc = devm_gpio_request(dev, gpio, "goodix_reset");
+	if (rc)
+		goto err_cleanup;
+	gf_dev->reset_gpio = gpio;
+	rc = gpio_direction_output(gpio, 1);
+	if (rc)
+		goto err_cleanup;
 
-	rc = devm_gpio_request(dev, gf_dev->reset_gpio, "goodix_reset");
-	if (rc) {
-		pr_err("failed to request reset gpio, rc = %d\n", rc);
-		goto err_reset;
+	gpio = of_get_named_gpio(np, "goodix,irq_gpio", 0);
+	if (gpio < 0) {
+		rc = gpio;
+		goto err_cleanup;
 	}
-	gpio_direction_output(gf_dev->reset_gpio, 1);
+	rc = devm_gpio_request(dev, gpio, "goodix_irq");
+	if (rc)
+		goto err_cleanup;
+	gf_dev->irq_gpio = gpio;
+	rc = gpio_direction_input(gpio);
+	if (rc)
+		goto err_cleanup;
 
-	gf_dev->irq_gpio = of_get_named_gpio(np, "goodix,irq_gpio", 0);
-	if (gf_dev->irq_gpio < 0) {
-		pr_err("falied to get irq gpio!\n");
-		return gf_dev->irq_gpio;
-	}
+	return 0;
 
-	rc = devm_gpio_request(dev, gf_dev->irq_gpio, "goodix_irq");
-	if (rc) {
-		pr_err("failed to request irq gpio, rc = %d\n", rc);
-		goto err_irq;
-	}
-	gpio_direction_input(gf_dev->irq_gpio);
-
-err_irq:
-	devm_gpio_free(dev, gf_dev->reset_gpio);
-err_reset:
-	devm_gpio_free(dev, gf_dev->vdd_gpio);
-err_vdd:
+err_cleanup:
+	gf_cleanup(gf_dev);
 	return rc;
 }
 
 void gf_cleanup(struct gf_dev *gf_dev)
 {
+	struct device *dev = &gf_dev->spi->dev;
+
 	pr_info("[info] %s\n", __func__);
 
 	if (gpio_is_valid(gf_dev->irq_gpio)) {
-		gpio_free(gf_dev->irq_gpio);
-		pr_info("remove irq_gpio success\n");
+		devm_gpio_free(dev, gf_dev->irq_gpio);
+		gf_dev->irq_gpio = -EINVAL;
 	}
 	if (gpio_is_valid(gf_dev->reset_gpio)) {
-		gpio_free(gf_dev->reset_gpio);
-		pr_info("remove reset_gpio success\n");
+		devm_gpio_free(dev, gf_dev->reset_gpio);
+		gf_dev->reset_gpio = -EINVAL;
+	}
+	if (gpio_is_valid(gf_dev->vdd_gpio)) {
+		devm_gpio_free(dev, gf_dev->vdd_gpio);
+		gf_dev->vdd_gpio = -EINVAL;
 	}
 }
 

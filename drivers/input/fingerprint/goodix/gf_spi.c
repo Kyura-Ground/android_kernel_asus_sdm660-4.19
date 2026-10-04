@@ -93,6 +93,9 @@ static struct gf_key_map maps[] = {
 
 static void gf_enable_irq(struct gf_dev *gf_dev)
 {
+	if (!gf_dev->irq_requested)
+		return;
+
 	if (gf_dev->irq_enabled) {
 		pr_warn("IRQ has been enabled.\n");
 	} else {
@@ -103,6 +106,9 @@ static void gf_enable_irq(struct gf_dev *gf_dev)
 
 static void gf_disable_irq(struct gf_dev *gf_dev)
 {
+	if (!gf_dev->irq_requested)
+		return;
+
 	if (gf_dev->irq_enabled) {
 		gf_dev->irq_enabled = 0;
 		disable_irq(gf_dev->irq);
@@ -335,6 +341,9 @@ static int irq_setup(struct gf_dev *gf_dev)
 	int status;
 
 	gf_dev->irq = gf_irq_num(gf_dev);
+	if (gf_dev->irq < 0)
+		return gf_dev->irq;
+
 	status = request_threaded_irq(gf_dev->irq, NULL, gf_irq,
 			IRQF_TRIGGER_RISING | IRQF_ONESHOT,
 			"gf", gf_dev);
@@ -343,18 +352,29 @@ static int irq_setup(struct gf_dev *gf_dev)
 		pr_err("failed to request IRQ:%d\n", gf_dev->irq);
 		return status;
 	}
-	enable_irq_wake(gf_dev->irq);
+	gf_dev->irq_requested = true;
 	gf_dev->irq_enabled = 1;
+	status = enable_irq_wake(gf_dev->irq);
+	gf_dev->irq_wake_enabled = !status;
+	if (status)
+		pr_warn("failed to enable IRQ wake:%d (%d)\n",
+			gf_dev->irq, status);
 
-	return status;
+	return 0;
 }
 
 static void irq_cleanup(struct gf_dev *gf_dev)
 {
-	gf_dev->irq_enabled = 0;
-	disable_irq(gf_dev->irq);
-	disable_irq_wake(gf_dev->irq);
+	if (!gf_dev->irq_requested)
+		return;
+
+	gf_disable_irq(gf_dev);
+	if (gf_dev->irq_wake_enabled) {
+		disable_irq_wake(gf_dev->irq);
+		gf_dev->irq_wake_enabled = false;
+	}
 	free_irq(gf_dev->irq, gf_dev);
+	gf_dev->irq_requested = false;
 }
 
 static void gf_kernel_key_input(struct gf_dev *gf_dev, struct gf_key *gf_key)
@@ -390,7 +410,7 @@ static void gf_kernel_key_input(struct gf_dev *gf_dev, struct gf_key *gf_key)
 
 static long gf_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
-	struct gf_dev *gf_dev = &gf;
+	struct gf_dev *gf_dev = filp->private_data;
 	struct gf_key gf_key;
 #if defined(SUPPORT_NAV_EVENT)
 	gf_nav_event_t nav_event = GF_NAV_NONE;
@@ -408,6 +428,14 @@ static long gf_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		retval = !access_ok(VERIFY_READ, (void __user *)arg, _IOC_SIZE(cmd));
 	if (retval)
 		return -EFAULT;
+
+	/* Serialize ioctl teardown with other ioctls, open and last close. */
+	mutex_lock(&device_list_lock);
+	if (!gf_dev->device_available && cmd != GF_IOC_REMOVE &&
+	    cmd != GF_IOC_EXIT) {
+		retval = -ENODEV;
+		goto out;
+	}
 
 	switch (cmd) {
 	case GF_IOC_INIT:
@@ -501,6 +529,7 @@ static long gf_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		pr_debug("%s GF_IOC_REMOVE\n", __func__);
 		irq_cleanup(gf_dev);
 		gf_cleanup(gf_dev);
+		gf_dev->device_available = 0;
 		break;
 
 	case GF_IOC_CHIP_INFO:
@@ -519,6 +548,8 @@ static long gf_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		break;
 	}
 
+out:
+	mutex_unlock(&device_list_lock);
 	return retval;
 }
 
@@ -546,33 +577,32 @@ static int gf_open(struct inode *inode, struct file *filp)
 	}
 
 	if (status == 0) {
-		if (status == 0) {
-			gf_dev->users++;
-			filp->private_data = gf_dev;
-			nonseekable_open(inode, filp);
-			pr_info("Succeed to open device. irq = %d\n",
-					gf_dev->irq);
-			if (gf_dev->users == 1) {
-				status = gf_parse_dts(gf_dev);
-				if (status)
-					goto err_parse_dt;
+		if (!gf_dev->users) {
+			status = gf_parse_dts(gf_dev);
+			if (status)
+				goto out;
 
-				status = irq_setup(gf_dev);
-				if (status)
-					goto err_irq;
+			status = irq_setup(gf_dev);
+			if (status) {
+				gf_cleanup(gf_dev);
+				goto out;
 			}
 			gf_hw_reset(gf_dev, 3);
-			gf_dev->device_available = 1;
+		} else if (!gf_dev->device_available) {
+			status = -ENODEV;
+			goto out;
 		}
+		gf_dev->users++;
+		filp->private_data = gf_dev;
+		nonseekable_open(inode, filp);
+		gf_dev->device_available = 1;
+		pr_info("Succeed to open device. irq = %d\n", gf_dev->irq);
 	} else {
 		pr_info("No device for minor %d\n", iminor(inode));
 	}
+out:
 	mutex_unlock(&device_list_lock);
 
-	return status;
-err_irq:
-	gf_cleanup(gf_dev);
-err_parse_dt:
 	return status;
 }
 
@@ -809,7 +839,6 @@ static int gf_remove(struct platform_device *pdev)
 	fb_unregister_client(&gf_dev->notifier);
 	if (gf_dev->input)
 		input_unregister_device(gf_dev->input);
-	input_free_device(gf_dev->input);
 
 	/* prevent new opens */
 	mutex_lock(&device_list_lock);
