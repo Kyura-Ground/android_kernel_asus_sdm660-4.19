@@ -929,6 +929,9 @@ int subsystem_set_fwname(const char *name, const char *fw_name)
 	strlcpy(subsys->desc->fw_name, fw_name,
 		sizeof(subsys->desc->fw_name));
 
+	/* find_subsys_device() took a reference; this caller only borrows. */
+	put_device(&subsys->dev);
+
 	return 0;
 }
 EXPORT_SYMBOL(subsystem_set_fwname);
@@ -947,6 +950,8 @@ int wait_for_shutdown_ack(struct subsys_desc *desc)
 
 	ret = wait_for_completion_timeout(&dev->shutdown_ack,
 						msecs_to_jiffies(10000));
+	/* find_subsys_device() took a reference; this caller only borrows. */
+	put_device(&dev->dev);
 	if (!ret) {
 		pr_err("[%s]: Timed out waiting for shutdown ack\n",
 				desc->name);
@@ -1247,6 +1252,8 @@ int subsystem_restart_dev(struct subsys_device *dev)
 	if (system_state == SYSTEM_RESTART
 		|| system_state == SYSTEM_POWER_OFF) {
 		pr_err("%s crashed during a system poweroff/shutdown.\n", name);
+		module_put(dev->owner);
+		put_device(&dev->dev);
 		return -EBUSY;
 	}
 
@@ -1256,6 +1263,8 @@ int subsystem_restart_dev(struct subsys_device *dev)
 	if (disable_restart_work == DISABLE_SSR) {
 		pr_warn("subsys-restart: Ignoring restart request for %s\n",
 									name);
+		module_put(dev->owner);
+		put_device(&dev->dev);
 		return 0;
 	}
 
@@ -1303,9 +1312,6 @@ int subsystem_crashed(const char *name)
 	if (!dev)
 		return -ENODEV;
 
-	if (!get_device(&dev->dev))
-		return -ENODEV;
-
 	track = subsys_get_track(dev);
 
 	mutex_lock(&track->lock);
@@ -1317,6 +1323,7 @@ int subsystem_crashed(const char *name)
 	 */
 	mutex_unlock(&track->lock);
 
+	/* find_subsys_device() took a reference; this caller only borrows. */
 	put_device(&dev->dev);
 	return 0;
 }
@@ -1928,6 +1935,15 @@ struct subsys_device *subsys_register(struct subsys_desc *desc)
 
 	return subsys;
 err_setup_irqs:
+	/*
+	 * subsys was already linked into subsys_list above; device_unregister()
+	 * below runs subsys_device_release(), which kfree()s it.  Leaving it
+	 * on the list would make every later list_for_each_entry(&subsys_list)
+	 * dereference freed memory.
+	 */
+	mutex_lock(&subsys_list_lock);
+	list_del(&subsys->list);
+	mutex_unlock(&subsys_list_lock);
 	if (subsys->desc->edge)
 		sysmon_glink_unregister(desc);
 err_sysmon_glink_register:

@@ -37,89 +37,44 @@ struct cpufreq_suspend_t {
 };
 
 static DEFINE_PER_CPU(struct cpufreq_suspend_t, suspend_data);
-static DEFINE_PER_CPU(int, cached_resolve_idx);
-static DEFINE_PER_CPU(unsigned int, cached_resolve_freq);
 
-static int set_cpu_freq(struct cpufreq_policy *policy, unsigned int new_freq,
-			unsigned int index)
+static int set_cpu_freq(struct cpufreq_policy *policy, unsigned int new_freq)
 {
-	int ret = 0;
-	struct cpufreq_freqs freqs;
+	int ret;
 	unsigned long rate;
 
-	freqs.old = policy->cur;
-	freqs.new = new_freq;
-
-	trace_cpu_frequency_switch_start(freqs.old, freqs.new, policy->cpu);
-	cpufreq_freq_transition_begin(policy, &freqs);
+	trace_cpu_frequency_switch_start(policy->cur, new_freq, policy->cpu);
 
 	rate = new_freq * 1000;
 	rate = clk_round_rate(cpu_clk[policy->cpu], rate);
 	ret = clk_set_rate(cpu_clk[policy->cpu], rate);
-	cpufreq_freq_transition_end(policy, &freqs, ret);
-	if (!ret) {
-		arch_set_freq_scale(policy->related_cpus, new_freq,
-				    policy->cpuinfo.max_freq);
+	if (!ret)
 		trace_cpu_frequency_switch_end(policy->cpu);
-	}
 
 	return ret;
 }
 
-static int msm_cpufreq_target(struct cpufreq_policy *policy,
-				unsigned int target_freq,
-				unsigned int relation)
+static int msm_cpufreq_target_index(struct cpufreq_policy *policy,
+				    unsigned int index)
 {
 	int ret = 0;
-	int index;
-	struct cpufreq_frequency_table *table;
-	int first_cpu = cpumask_first(policy->related_cpus);
+	unsigned int new_freq = policy->freq_table[index].frequency;
 
 	mutex_lock(&per_cpu(suspend_data, policy->cpu).suspend_mutex);
-
-	if (target_freq == policy->cur)
-		goto done;
 
 	if (per_cpu(suspend_data, policy->cpu).device_suspended) {
 		pr_debug("cpufreq: cpu%d scheduling frequency change in suspend\n",
 			 policy->cpu);
-		ret = -EFAULT;
 		goto done;
 	}
 
-	table = policy->freq_table;
-	if (per_cpu(cached_resolve_freq, first_cpu) == target_freq)
-		index = per_cpu(cached_resolve_idx, first_cpu);
-	else
-		index = cpufreq_frequency_table_target(policy, target_freq,
-						       relation);
+	pr_debug("CPU[%d] selected index %u (%u kHz) (%u-%u)\n",
+		 policy->cpu, index, new_freq, policy->min, policy->max);
 
-	pr_debug("CPU[%d] target %d relation %d (%d-%d) selected %d\n",
-		policy->cpu, target_freq, relation,
-		policy->min, policy->max, table[index].frequency);
-
-	ret = set_cpu_freq(policy, table[index].frequency,
-			   table[index].driver_data);
+	ret = set_cpu_freq(policy, new_freq);
 done:
 	mutex_unlock(&per_cpu(suspend_data, policy->cpu).suspend_mutex);
 	return ret;
-}
-
-static unsigned int msm_cpufreq_resolve_freq(struct cpufreq_policy *policy,
-					     unsigned int target_freq)
-{
-	int index;
-	int first_cpu = cpumask_first(policy->related_cpus);
-	unsigned int freq;
-
-	index = cpufreq_frequency_table_target(policy, target_freq,
-					       CPUFREQ_RELATION_L);
-	freq = policy->freq_table[index].frequency;
-
-	per_cpu(cached_resolve_idx, first_cpu) = index;
-	per_cpu(cached_resolve_freq, first_cpu) = freq;
-
-	return freq;
 }
 
 static int msm_cpufreq_verify(struct cpufreq_policy *policy)
@@ -142,6 +97,7 @@ static int msm_cpufreq_init(struct cpufreq_policy *policy)
 	struct cpufreq_frequency_table *table =
 			per_cpu(freq_table, policy->cpu);
 	int cpu;
+	struct cpufreq_freqs freqs;
 
 	/*
 	 * In some SoC, some cores are clocked by same source, and their
@@ -168,8 +124,11 @@ static int msm_cpufreq_init(struct cpufreq_policy *policy)
 	 * Call set_cpu_freq unconditionally so that when cpu is set to
 	 * online, frequency limit will always be updated.
 	 */
-	ret = set_cpu_freq(policy, table[index].frequency,
-			   table[index].driver_data);
+	freqs.old = policy->cur;
+	freqs.new = table[index].frequency;
+	cpufreq_freq_transition_begin(policy, &freqs);
+	ret = set_cpu_freq(policy, table[index].frequency);
+	cpufreq_freq_transition_end(policy, &freqs, ret);
 	if (ret)
 		return ret;
 	pr_debug("cpufreq: cpu%d init at %d switching to %d\n",
@@ -333,8 +292,7 @@ static struct cpufreq_driver msm_cpufreq_driver = {
 	.flags		= CPUFREQ_CONST_LOOPS | CPUFREQ_NEED_INITIAL_FREQ_CHECK,
 	.init		= msm_cpufreq_init,
 	.verify		= msm_cpufreq_verify,
-	.target		= msm_cpufreq_target,
-	.resolve_freq	= msm_cpufreq_resolve_freq,
+	.target_index	= msm_cpufreq_target_index,
 	.get		= msm_cpufreq_get_freq,
 	.name		= "msm",
 	.attr		= msm_freq_attr,
@@ -503,7 +461,6 @@ static int __init msm_cpufreq_register(void)
 	for_each_possible_cpu(cpu) {
 		mutex_init(&(per_cpu(suspend_data, cpu).suspend_mutex));
 		per_cpu(suspend_data, cpu).device_suspended = 0;
-		per_cpu(cached_resolve_freq, cpu) = UINT_MAX;
 	}
 
 	rc = platform_driver_register(&msm_cpufreq_plat_driver);

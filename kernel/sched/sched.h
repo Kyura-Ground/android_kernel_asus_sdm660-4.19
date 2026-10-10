@@ -346,6 +346,7 @@ static inline bool dl_task_fits_capacity(struct task_struct *p, int cpu)
 }
 
 extern void dl_change_utilization(struct task_struct *p, u64 new_bw);
+
 extern void init_dl_bw(struct dl_bw *dl_b);
 extern int  sched_dl_global_validate(void);
 extern void sched_dl_do_global(void);
@@ -357,6 +358,8 @@ extern bool dl_param_changed(struct task_struct *p, const struct sched_attr *att
 extern int  dl_task_can_attach(struct task_struct *p, const struct cpumask *cs_cpus_allowed);
 extern int  dl_cpuset_cpumask_can_shrink(const struct cpumask *cur, const struct cpumask *trial);
 extern bool dl_cpu_busy(unsigned int cpu);
+unsigned long approximate_util_avg(unsigned long util, u64 delta);
+u64 approximate_runtime(unsigned long util);
 
 #ifdef CONFIG_CGROUP_SCHED
 
@@ -1047,7 +1050,7 @@ struct rq {
 	struct sched_domain __rcu	*sd;
 
 	unsigned long		cpu_capacity;
-	unsigned long		cpu_capacity_orig;
+	unsigned long		fits_capacity_threshold;
 
 	struct callback_head	*balance_callback;
 
@@ -2251,11 +2254,6 @@ static inline unsigned long capacity_of(int cpu)
 	return cpu_rq(cpu)->cpu_capacity;
 }
 
-static inline unsigned long capacity_orig_of(int cpu)
-{
-	return cpu_rq(cpu)->cpu_capacity_orig;
-}
-
 static inline unsigned long task_util(struct task_struct *p)
 {
 	return READ_ONCE(p->se.avg.util_avg);
@@ -2313,13 +2311,13 @@ static inline unsigned long __cpu_util(int cpu)
 	if (sched_feat(UTIL_EST))
 		util = max(util, READ_ONCE(cfs_rq->avg.util_est));
 
-	return min_t(unsigned long, util, capacity_orig_of(cpu));
+	return min_t(unsigned long, util, arch_scale_cpu_capacity(cpu));
 }
 
 static inline unsigned long cpu_util_cum(int cpu, int delta)
 {
 	u64 util = cpu_rq(cpu)->cfs.avg.util_avg;
-	unsigned long capacity = capacity_orig_of(cpu);
+	unsigned long capacity = arch_scale_cpu_capacity(cpu);
 
 	delta += util;
 	if (delta < 0)
@@ -2887,7 +2885,7 @@ static inline unsigned long cpu_util_rt(struct rq *rq)
 static inline unsigned long cpu_util(int cpu)
 {
 	return min(__cpu_util(cpu) + cpu_util_rt(cpu_rq(cpu)),
-		   capacity_orig_of(cpu));
+		   arch_scale_cpu_capacity(cpu));
 }
 #endif
 
