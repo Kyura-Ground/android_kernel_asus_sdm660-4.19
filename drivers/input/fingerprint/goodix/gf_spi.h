@@ -131,6 +131,8 @@ struct gf_dev {
 	signed reset_gpio;
 	signed vdd_gpio;
 	int irq;
+	bool irq_requested;
+	bool irq_wake_enabled;
 	int irq_enabled;
 	int clk_enabled;
 #ifdef GF_FASYNC
