@@ -28,8 +28,11 @@ kernel_headers_verbose = ""
 
 build = ["gen_headers_arm.bp", "gen_headers_arm64.bp"]
 
-cc_library_headers {
-    name: "qti_kernel_headers",
+// AOSPA uses the in-tree generator; the legacy HALs consume these defaults.
+cc_defaults {
+    name: "generated_kernel_header_defaults",
+    header_libs: ["qcom_audio_kernel_headers"],
+    export_header_lib_headers: ["qcom_audio_kernel_headers"],
     arch: {
         arm: {
             generated_headers: ["qti_generate_kernel_headers_arm"],
@@ -40,6 +43,11 @@ cc_library_headers {
             export_generated_headers: ["qti_generate_kernel_headers_arm64"],
         },
     },
-    vendor: true,
+    vendor_available: true,
     recovery_available: true,
+}
+
+cc_library_headers {
+    name: "generated_kernel_headers",
+    defaults: ["generated_kernel_header_defaults"],
 }
