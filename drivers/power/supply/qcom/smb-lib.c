@@ -1464,6 +1464,19 @@ static int smblib_chg_disable_vote_callback(struct votable *votable, void *data,
 		return rc;
 	}
 
+	/* Parallel charging becomes available after the battery is registered. */
+	if (chg->batt_psy) {
+		rc = vote(chg->pl_disable_votable, CHG_DISABLE_VOTER,
+				chg_disable, 0);
+		if (rc < 0)
+			return rc;
+
+		/* Retry a previous parallel callback failure on repeated requests. */
+		rc = rerun_election(chg->pl_disable_votable);
+		if (rc < 0)
+			return rc;
+	}
+
 	return 0;
 }
 
@@ -3465,6 +3478,17 @@ int smblib_set_prop_pd_in_hard_reset(struct smb_charger *chg,
 	return rc;
 }
 
+static int smblib_restart_charging(struct smb_charger *chg, const char *voter)
+{
+	int rc, restore_rc;
+
+	rc = vote(chg->chg_disable_votable, voter, true, 0);
+	/* Always release the temporary vote, including after a callback failure. */
+	restore_rc = vote(chg->chg_disable_votable, voter, false, 0);
+
+	return rc < 0 ? rc : restore_rc;
+}
+
 static int smblib_recover_from_soft_jeita(struct smb_charger *chg)
 {
 	u8 stat_1, stat_2;
@@ -3490,16 +3514,9 @@ static int smblib_recover_from_soft_jeita(struct smb_charger *chg)
 		 * We are moving from JEITA soft -> Normal and charging
 		 * is terminated
 		 */
-		rc = smblib_write(chg, CHARGING_ENABLE_CMD_REG, 0);
+		rc = smblib_restart_charging(chg, JEITA_RECHARGE_VOTER);
 		if (rc < 0) {
-			smblib_err(chg, "Couldn't disable charging rc=%d\n",
-						rc);
-			return rc;
-		}
-		rc = smblib_write(chg, CHARGING_ENABLE_CMD_REG,
-						CHARGING_ENABLE_CMD_BIT);
-		if (rc < 0) {
-			smblib_err(chg, "Couldn't enable charging rc=%d\n",
+			smblib_err(chg, "Couldn't restart charging rc=%d\n",
 						rc);
 			return rc;
 		}
@@ -3764,8 +3781,8 @@ void smblib_asus_monitor_start(struct smb_charger *chg, int time)
 	cancel_delayed_work(&chg->asus_min_monitor_work);
 	schedule_delayed_work(&chg->asus_min_monitor_work, msecs_to_jiffies(time));
 }
-#define EN_BAT_CHG_EN_COMMAND_TRUE		0
-#define EN_BAT_CHG_EN_COMMAND_FALSE 	BIT(0)
+#define EN_BAT_CHG_EN_COMMAND_TRUE		CHARGING_ENABLE_CMD_BIT
+#define EN_BAT_CHG_EN_COMMAND_FALSE		0
 #define SMBCHG_FLOAT_VOLTAGE_VALUE_4P004		0x45
 #define SMBCHG_FLOAT_VOLTAGE_VALUE_4P064		0x4D
 #define SMBCHG_FLOAT_VOLTAGE_VALUE_4P350		0x73
@@ -3804,16 +3821,9 @@ static int SW_recharge(struct smb_charger *chg)
 	capacity = asus_get_prop_batt_capacity(smbchg_dev);
 
 	if (capacity <= 98 && termination_done) {
-		//reg=1042    CHARGING_ENABLE_CMD  bit0=1    CHARGING_ENABLE_CMD_IS_ACTIVE
-		rc = smblib_masked_write(chg, CHARGING_ENABLE_CMD_REG, CHARGING_ENABLE_CMD_BIT, CHARGING_ENABLE_CMD_BIT);
+		rc = smblib_restart_charging(chg, ASUS_RECHARGE_VOTER);
 		if (rc < 0) {
-			CHG_DBG_E("%s: Couldn't write charging_enable\n", __func__);
-			return rc;
-		}
-		//reg=1042    CHARGING_ENABLE_CMD  bit0=0    CHARGING_ENABLE_CMD_IS_INACTIVE
-		rc = smblib_masked_write(chg, CHARGING_ENABLE_CMD_REG, CHARGING_ENABLE_CMD_BIT, 0);
-		if (rc < 0) {
-			CHG_DBG_E("%s: Couldn't write charging_enable\n", __func__);
+			CHG_DBG_E("%s: Couldn't restart charging\n", __func__);
 			return rc;
 		}
 	}
@@ -3867,8 +3877,8 @@ int smbchg_jeita_judge_state(int old_State, int batt_tempr)
 static int jeita_status_regs_write(u8 chg_en, u8 FV_CFG, u8 FCC)
 {
 	int rc;
-	//reg=1042     bit0    reg=1042    CHARGING_ENABLE_CMD  bit0=1    CHARGING_ENABLE_CMD_IS_ACTIVE	
-	rc = smblib_masked_write(smbchg_dev, CHARGING_ENABLE_CMD_REG, CHARGING_ENABLE_CMD_BIT, chg_en);
+	rc = vote(smbchg_dev->chg_disable_votable, ASUS_JEITA_VOTER,
+			!chg_en, 0);
 	if (rc < 0) {
 		printk("[BAT][CHG] Couldn't write charging_enable rc = %d\n", rc);
 		return rc;
@@ -4190,22 +4200,11 @@ void asus_insertion_initial_settings(struct smb_charger *chg)
 	if (rc < 0) {
 		dev_err(chg->dev, "Couldn't set default USBIN_ADAPTER_ALLOW_CFG_REG rc=%d\n", rc);
 	}
-//No.8
-	rc = smblib_write(chg, CHGR_CFG2_REG, 0x40);                        //reg=1051   01000000      bit6=Charge Enable Polarity      1 = Active low (0: enable charging)
+	/* Keep the software charge control configured by smb2_init_hw(). */
+	rc = smblib_restart_charging(chg, ASUS_INIT_VOTER);
 	if (rc < 0) {
-		dev_err(chg->dev, "Couldn't set default CHGR_CFG2_REG rc=%d\n", rc);
-	}
-//No.9
-	rc = smblib_masked_write(chg, CHARGING_ENABLE_CMD_REG,                   //reg=1042  1 enable    CHARGING_ENABLE_CMD
-			CHARGING_ENABLE_CMD_BIT, CHARGING_ENABLE_CMD_BIT);
-	if (rc < 0) {
-		dev_err(chg->dev, "Couldn't set default CHARGING_ENABLE_CMD_REG rc=%d\n", rc);
-	}
-//No.10
-	rc = smblib_masked_write(chg, CHARGING_ENABLE_CMD_REG,                 //reg=1042  0    disenable   CHARGING_ENABLE_CMD
-			CHARGING_ENABLE_CMD_BIT, 0);
-	if (rc < 0) {
-		dev_err(chg->dev, "Couldn't set default CHARGING_ENABLE_CMD_REG rc=%d\n", rc);
+		dev_err(chg->dev, "Couldn't restart charging for insertion rc=%d\n", rc);
+		return;
 	}
 //No.11
 	rc = smblib_masked_write(chg, VSYS_MIN_SEL_CFG_REG,                          //reg=1683       vsy_min=3.6v     Minimum system voltage setting

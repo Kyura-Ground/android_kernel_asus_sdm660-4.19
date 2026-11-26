@@ -1122,6 +1122,7 @@ static int smb2_batt_get_prop(struct power_supply *psy,
 	struct smb_charger *chg = power_supply_get_drvdata(psy);
 	int rc = 0;
 	union power_supply_propval pval = {0, };
+	u8 charging;
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_STATUS:
@@ -1134,7 +1135,9 @@ static int smb2_batt_get_prop(struct power_supply *psy,
 		rc = smblib_get_prop_batt_present(chg, val);
 		break;
 	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
-		val->intval = !get_effective_result(chg->chg_disable_votable);
+		rc = smblib_read(chg, CHARGING_ENABLE_CMD_REG, &charging);
+		if (!rc)
+			val->intval = !!(charging & CHARGING_ENABLE_CMD_BIT);
 		break;
 	case POWER_SUPPLY_PROP_INPUT_SUSPEND:
 		rc = smblib_get_prop_input_suspend(chg, val);
@@ -1264,7 +1267,16 @@ static int smb2_batt_set_prop(struct power_supply *psy,
 		rc = smblib_set_prop_batt_status(chg, val);
 		break;
 	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
-		vote(chg->chg_disable_votable, USER_VOTER, !!!val->intval, 0);
+		if (val->intval != 0 && val->intval != 1) {
+			rc = -EINVAL;
+			break;
+		}
+		rc = vote(chg->chg_disable_votable, USER_VOTER,
+				!val->intval, 0);
+		if (!rc)
+			rc = rerun_election(chg->chg_disable_votable);
+		if (!rc)
+			power_supply_changed(chg->batt_psy);
 		break;
 	case POWER_SUPPLY_PROP_INPUT_SUSPEND:
 		rc = smblib_set_prop_input_suspend(chg, val);
