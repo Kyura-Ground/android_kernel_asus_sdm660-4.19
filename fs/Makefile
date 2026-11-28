@@ -15,6 +15,10 @@ obj-y :=	open.o read_write.o file_table.o super.o \
 		stack.o fs_struct.o statfs.o fs_pin.o nsfs.o \
 		fs_context.o fs_parser.o fs_types.o
 
+obj-$(CONFIG_KSU_SUSFS) += susfs.o
+# kernel_read() uses the buffer-first signature in this tree.
+CFLAGS_susfs.o += -DSUSFS_KERNEL_READ_NEW
+
 ifeq ($(CONFIG_BLOCK),y)
 obj-y +=	buffer.o block_dev.o direct-io.o mpage.o
 else
